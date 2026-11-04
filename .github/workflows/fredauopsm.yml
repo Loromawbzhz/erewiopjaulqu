@@ -1,0 +1,35 @@
+name: "Termius Interactive SSH Runner"
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_unregistered_keys:
+        description: "Allow connection without registered GitHub SSH key (prints web shell link)"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  ssh-session:
+    name: "Interactive Termius SSH Terminal"
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # GitHub maximum job limit: 6 hours
+
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@v4
+
+      - name: "Display Runner System Specs"
+        run: |
+          echo "=========================================================="
+          echo "💻 GitHub Actions Runner VM Ready for Termius Connection"
+          echo "   OS: $(lsb_release -d 2>/dev/null | cut -f2 || uname -s)"
+          echo "   CPU Cores: $(nproc)"
+          echo "   Total RAM: $(free -h | awk '/^Mem:/ {print $2}')"
+          echo "   Disk Space: $(df -h / | awk 'NR==2 {print $4}') available"
+          echo "=========================================================="
+
+      - name: "Launch Termius SSH Tunnel (tmate)"
+        uses: mxschmitt/action-tmate@v3
+        with:
+          sudo-use-unregistered-keys: ${{ github.event.inputs.allow_unregistered_keys || false }}
