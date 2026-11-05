@@ -33,13 +33,15 @@ jobs:
         uses: mxschmitt/action-tmate@v3
         with:
           detached: true
-          connect-timeout-seconds: 0
           limit-access-to-actor: false
 
       - name: "Generate Termius Connection Guide & Keep-Alive"
         env:
-          DISCORD_WEBHOOK: ${{ github.event.inputs.discord_webhook || secrets.DISCORD_WEBHOOK_URL }}
+          INPUT_DISCORD: ${{ github.event.inputs.discord_webhook }}
+          SECRET_DISCORD: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          DISCORD_WEBHOOK="${INPUT_DISCORD:-$SECRET_DISCORD}"
+
           # Wait for tmate socket and connection strings
           SSH_CMD=""
           WEB_URL=""
@@ -75,41 +77,34 @@ jobs:
           echo "=========================================================="
           echo ""
 
-          # GitHub Actions Summary (Visible on the main workflow run page!)
-          cat << EOF > summary.md
-# 🚀 Termius SSH Connection Details
-
-### 📱 Enter these exact fields in Termius:
-| Termius Field | Value to Enter |
-|---|---|
-| Hostname / IP | \`$SSH_HOST\` |
-| Port | \`22\` |
-| Username | \`$SSH_USER\` |
-| Password | *(Leave Empty)* |
-| SSH Key | *(None)* |
-
----
-
-### 💻 Command Line (Terminal / PowerShell / Mac):
-\`\`\`bash
-$SSH_CMD
-\`\`\`
-
----
-
-### 🌐 Instant Web Browser Terminal (No Termius Needed):
-👉 [Click Here to Open Web Terminal]($WEB_URL)
-
----
-> ⏳ Session Lifetime: Up to 6 hours. To disconnect and stop the runner, type \`touch /tmp/keepalive_stop\` or cancel the GitHub Actions run.
-EOF
-
-          cat summary.md >> \$GITHUB_STEP_SUMMARY
+          # Output to GitHub Action Step Summary
+          echo "# 🚀 Termius SSH Connection Details" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 📱 Enter these exact fields in Termius:" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Hostname / IP | \`$SSH_HOST\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Port | \`$SSH_PORT\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Username | \`$SSH_USER\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Password | *(Leave empty)* |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SSH Key | *(None)* |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 💻 Command Line (Terminal / PowerShell / Mac):" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
+          echo "$SSH_CMD" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 🌐 Instant Web Browser Terminal (No App Needed):" >> "$GITHUB_STEP_SUMMARY"
+          echo "👉 [Click to Open Web Terminal]($WEB_URL)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "> ⏳ Session Lifetime: Up to 6 hours. To disconnect and stop the runner, type touch /tmp/keepalive_stop or cancel the run." >> "$GITHUB_STEP_SUMMARY"
 
           # Send Discord Notification if Webhook URL is provided
           if [ -n "$DISCORD_WEBHOOK" ]; then
             curl -s -H "Content-Type: application/json" -X POST -d "{
-              \"content\": \"🚀 GitHub Actions Termius SSH Node Ready!**\n\n**Host: \`$SSH_HOST\`\n**Port:** \`$SSH_PORT\`\n**User:** \`$SSH_USER\`\n**Command:** \`$SSH_CMD\`\n**Web Shell:** $WEB_URL\"
+              \"content\": \"🚀 GitHub Actions Termius SSH Node Ready!**\\n\\n**Host: \`$SSH_HOST\`\\n**Port:** \`$SSH_PORT\`\\n**User:** \`$SSH_USER\`\\n**Command:** \`$SSH_CMD\`\\n**Web Shell:** $WEB_URL\"
             }" "$DISCORD_WEBHOOK" >/dev/null || true
           fi
 
