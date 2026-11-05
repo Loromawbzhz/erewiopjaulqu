@@ -29,36 +29,22 @@ jobs:
           echo "   Disk Space: $(df -h / | awk 'NR==2 {print $4}') available"
           echo "=========================================================="
 
-      - name: "Launch Termius SSH Tunnel (tmate)"
-        uses: mxschmitt/action-tmate@v3
+      - name: "Launch Termius SSH Tunnel (Upterm)"
+        uses: owenthereal/action-upterm@v1
+        id: upterm
         with:
           detached: true
           limit-access-to-actor: false
 
-      - name: "Generate Termius Connection Guide & Keep-Alive"
+      - name: "Format Termius Details & Send Notifications"
         env:
           INPUT_DISCORD: ${{ github.event.inputs.discord_webhook }}
           SECRET_DISCORD: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SSH_CMD: ${{ steps.upterm.outputs.ssh-command }}
         run: |
           DISCORD_WEBHOOK="${INPUT_DISCORD:-$SECRET_DISCORD}"
 
-          # Wait for tmate socket and connection strings
-          SSH_CMD=""
-          WEB_URL=""
-          for i in {1..30}; do
-            if [ -S /tmp/tmate.sock ]; then
-              TMATE_BIN="tmate"
-              if [ -x "/tmp/tmate/tmate" ]; then
-                TMATE_BIN="/tmp/tmate/tmate"
-              fi
-              SSH_CMD=$($TMATE_BIN -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || true)
-              WEB_URL=$($TMATE_BIN -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || true)
-              if [ -n "$SSH_CMD" ]; then break; fi
-            fi
-            sleep 1
-          done
-
-          # Parse SSH Command (format: ssh username@hostname.tmate.io)
+          # Parse SSH Command (format: ssh user@host)
           RAW_ADDR=$(echo "$SSH_CMD" | sed -e 's/^ssh //')
           SSH_USER=$(echo "$RAW_ADDR" | cut -d'@' -f1)
           SSH_HOST=$(echo "$RAW_ADDR" | cut -d'@' -f2)
@@ -72,16 +58,14 @@ jobs:
           echo "   Port:          $SSH_PORT"
           echo "   Username:      $SSH_USER"
           echo "   Password:      (Leave Empty)"
-          echo "   SSH Command:   $SSH_CMD"
-          echo "   Web Shell URL: $WEB_URL"
+          echo "   Full Command:  $SSH_CMD"
           echo "=========================================================="
           echo ""
 
-          # Output to GitHub Action Step Summary
-          echo "# 🚀 Termius SSH Connection Details" >> "$GITHUB_STEP_SUMMARY"
+          # Add exact Termius fields to Step Summary
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### 📱 Enter these exact fields in Termius:" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Termius Field | Value to Enter |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
           echo "| Hostname / IP | \`$SSH_HOST\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Port | \`$SSH_PORT\` |" >> "$GITHUB_STEP_SUMMARY"
@@ -89,28 +73,18 @@ jobs:
           echo "| Password | *(Leave empty)* |" >> "$GITHUB_STEP_SUMMARY"
           echo "| SSH Key | *(None)* |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "---" >> "$GITHUB_STEP_SUMMARY"
-          echo "### 💻 Command Line (Terminal / PowerShell / Mac):" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
-          echo "$SSH_CMD" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "---" >> "$GITHUB_STEP_SUMMARY"
-          echo "### 🌐 Instant Web Browser Terminal (No App Needed):" >> "$GITHUB_STEP_SUMMARY"
-          echo "👉 [Click to Open Web Terminal]($WEB_URL)" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "> ⏳ Session Lifetime: Up to 6 hours. To disconnect and stop the runner, type touch /tmp/keepalive_stop or cancel the run." >> "$GITHUB_STEP_SUMMARY"
+          echo "> ⏳ Session Lifetime: Up to 6 hours. To disconnect and stop the runner, type \`touch /tmp/keepalive_stop\` or cancel the run." >> "$GITHUB_STEP_SUMMARY"
 
           # Send Discord Notification if Webhook URL is provided
           if [ -n "$DISCORD_WEBHOOK" ]; then
             curl -s -H "Content-Type: application/json" -X POST -d "{
-              \"content\": \"🚀 GitHub Actions Termius SSH Node Ready!**\\n\\n**Host: \`$SSH_HOST\`\\n**Port:** \`$SSH_PORT\`\\n**User:** \`$SSH_USER\`\\n**Command:** \`$SSH_CMD\`\\n**Web Shell:** $WEB_URL\"
+              \"content\": \"🚀 GitHub Actions Termius SSH Node Ready!**\\n\\n**Host: \`$SSH_HOST\`\\n**Port:** \`$SSH_PORT\`\\n**User:** \`$SSH_USER\`\\n**Command:** \`$SSH_CMD\`\"
             }" "$DISCORD_WEBHOOK" >/dev/null || true
           fi
 
           echo "⏳ Runner is now listening. Waiting for your SSH connection..."
           # Keep runner alive for up to 6 hours or until stopped
-          while [ -S /tmp/tmate.sock ] && [ ! -f /tmp/keepalive_stop ]; do
+          while pgrep -f upterm >/dev/null && [ ! -f /tmp/keepalive_stop ]; do
             sleep 10
           done
           echo "Session finished."
