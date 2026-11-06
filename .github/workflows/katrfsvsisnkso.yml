@@ -150,7 +150,7 @@ jobs:
               "fields": [
                 { "name": "🌐 Access Dashboard URL", "value": "$WEB_URL", "inline": false },
                 { "name": "⏱️ Keep-Alive Window", "value": "Up to 6 Hours (or until workflow cancelled)", "inline": true },
-                { "name": "💾 Target Database", "value": "Direct MongoDB Atlas Sync (${{ secrets.GITHUB_REPO || 'dbclone01' }})", "inline": true },
+                { "name": "💾 Target Database", "value": "Direct MongoDB Atlas Sync (${{ secrets.GH_REPO || 'dbclone01' }})", "inline": true },
                 { "name": "🐳 Container Engine", "value": "Secure GHCR Container", "inline": false }
               ],
               "footer": { "text": "MSR-Database V4 Architecture • Zero Cloud Server Costs" }
