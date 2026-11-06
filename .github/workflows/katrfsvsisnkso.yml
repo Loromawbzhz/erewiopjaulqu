@@ -1,0 +1,173 @@
+name: 🚀 Deploy Ephemeral Cloud Dashboard (TryCloudflare 6H Free)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_local:
+        description: 'Force build from local Dockerfile? (Only if Dockerfile exists in repo)'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  ephemeral-dashboard:
+    name: 🌌 Cloudflare Tunnel Web Dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # GitHub Actions maximum limit (6 hours)
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4.2.2
+
+      - name: 🔑 Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GITHUB_OWNER || github.actor }}
+          password: ${{ secrets.MY_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: 🐳 Prepare Docker Image (GHCR or Local Build)
+        env:
+          SECRET_IMAGE: ${{ secrets.GHCR_IMAGE }}
+        run: |
+          GHCR_IMAGE="$SECRET_IMAGE"
+          if [ -z "$GHCR_IMAGE" ]; then
+            REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+            GHCR_IMAGE="ghcr.io/${REPO_LOWER}:latest"
+          fi
+          
+          USE_LOCAL=false
+          if [ "${{ inputs.build_local }}" = "true" ]; then
+            if [ -f Dockerfile ]; then
+              echo "🔧 input.build_local=true requested and Dockerfile exists. Building directly from source..."
+              USE_LOCAL=true
+            else
+              echo "⚠️ No Dockerfile found in this repository! Cannot build locally. Proceeding with GHCR pull..."
+            fi
+          fi
+
+          if [ "$USE_LOCAL" != "true" ]; then
+            echo "📥 Attempting to pull configured GHCR image..."
+            if docker pull "$GHCR_IMAGE"; then
+              echo "✅ Successfully pulled GHCR image."
+              echo "TARGET_IMAGE=$GHCR_IMAGE" >> $GITHUB_ENV
+            else
+              echo "⚠️ GHCR pull failed."
+              if [ -f Dockerfile ]; then
+                echo "🔨 Dockerfile detected! Falling back to local build on runner..."
+                USE_LOCAL=true
+              else
+                echo "❌ FATAL: Cannot pull configured image and no Dockerfile exists in this repository."
+                exit 1
+              fi
+            fi
+          fi
+
+          if [ "$USE_LOCAL" = "true" ]; then
+            echo "🔨 Building Docker image locally on runner..."
+            docker build -t msr-app-local .
+            echo "TARGET_IMAGE=msr-app-local" >> $GITHUB_ENV
+          fi
+
+      - name: 🚀 Start MSR-Database Container
+        env:
+          TOKEN: ${{ secrets.MY_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          OWNER: ${{ secrets.GITHUB_OWNER || github.actor }}
+          REPO: ${{ secrets.GITHUB_REPO || 'dbclone01' }}
+        run: |
+          echo "=========================================================="
+          echo "🚀 Spawning MSR-Database Container"
+          echo "🐳 Image:        [Configured GHCR Container]"
+          echo "👤 GitHub Owner: $OWNER"
+          echo "💾 Sync Repo:    $REPO"
+          echo "🔌 Port:         3000"
+          echo "=========================================================="
+
+          docker run -d \
+            -p 127.0.0.1:3000:3000 \
+            -e GITHUB_TOKEN="$TOKEN" \
+            -e GITHUB_OWNER="$OWNER" \
+            -e GITHUB_REPO="$REPO" \
+            -e PORT=3000 \
+            --name msr-app \
+            "$TARGET_IMAGE"
+
+          echo "Waiting for Next.js web service to report healthy..."
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:3000/api/system/db-status >/dev/null 2>&1 || curl -s http://127.0.0.1:3000 >/dev/null 2>&1; then
+              echo "✅ Web service is healthy on port 3000!"
+              break
+            fi
+            echo "Waiting for container boot ($i/30)..."
+            sleep 2
+          done
+
+      - name: 🚇 Install & Launch Cloudflare HTTP/2 Tunnel
+        run: |
+          echo "Downloading Cloudflared..."
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          
+          echo "Starting Cloudflare quick tunnel to http://127.0.0.1:3000..."
+          cloudflared tunnel --protocol http2 --url http://127.0.0.1:3000 > cloudflared.log 2>&1 &
+
+      - name: 🌐 Announce Public Live URL
+        run: |
+          echo "Waiting for Cloudflare tunnel URL to establish..."
+          for i in {1..30}; do
+            if grep -q 'https://[-0-9a-z]*\.trycloudflare\.com' cloudflared.log; then
+              break
+            fi
+            sleep 2
+          done
+
+          WEB_URL=$(grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' cloudflared.log | head -n1)
+
+          if [ -z "$WEB_URL" ]; then
+            echo "❌ Failed to obtain Cloudflare tunnel URL. Dumping log:"
+            cat cloudflared.log
+            exit 1
+          fi
+
+          echo ""
+          echo "=========================================================="
+          echo "🎉 MSR-DATABASE EPHEMERAL DASHBOARD IS LIVE!"
+          echo "🌐 ACCESS URL : $WEB_URL"
+          echo "⏱️  MAX RUNTIME: Up to 6 Hours (Cancel workflow when done)"
+          echo "=========================================================="
+          echo ""
+
+          if [ -n "${{ secrets.DISCORD_WEBHOOK_URL }}" ]; then
+            PAYLOAD=$(cat <<EOF
+          {
+            "embeds": [{
+              "title": "🚀 MSR-Database Ephemeral Cloud Dashboard Online",
+              "description": "Your on-demand web dashboard is active on GitHub Actions via Cloudflare Tunnel.",
+              "color": 65280,
+              "fields": [
+                { "name": "🌐 Access Dashboard URL", "value": "$WEB_URL", "inline": false },
+                { "name": "⏱️ Keep-Alive Window", "value": "Up to 6 Hours (or until workflow cancelled)", "inline": true },
+                { "name": "💾 Target Database", "value": "Direct MongoDB Atlas Sync (${{ secrets.GITHUB_REPO || 'dbclone01' }})", "inline": true },
+                { "name": "🐳 Container Engine", "value": "Secure GHCR Container", "inline": false }
+              ],
+              "footer": { "text": "MSR-Database V4 Architecture • Zero Cloud Server Costs" }
+            }]
+          }
+          EOF
+            )
+            curl -s -H "Content-Type: application/json" -X POST -d "$PAYLOAD" "${{ secrets.DISCORD_WEBHOOK_URL }}" || true
+          fi
+
+      - name: 📜 Follow Live Container Logs (Keep-Alive)
+        run: |
+          echo "Dashboard running. Streaming live container logs..."
+          docker logs -f msr-app
+
+      - name: 🛑 Graceful Shutdown & Database Checkpoint
+        if: always()
+        run: |
+          echo "Workflow stopping. Shutting down MSR-Database container cleanly..."
+          docker stop msr-app || true
