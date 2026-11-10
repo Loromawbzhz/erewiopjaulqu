@@ -1,4 +1,4 @@
-name: Windows RDP & Web Desktop Node + socks5 (Watchdog Keep-Alive)
+name: Windows RDP & Web Desktop Node (Watchdog Keep-Alive)
 
 on:
   workflow_dispatch:
@@ -71,11 +71,11 @@ jobs:
           chmod +x /usr/local/bin/bore
           echo "✅ bore installed."
 
-      - name: 🧦 Launch SOCKS5 Proxies (Runner IP + WARP IP)
+      - name: 🧦 Launch SOCKS5 Proxies (Runner IP + WARP IP) with Port-Probing Watchdogs
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq microsocks
+          sudo apt-get update -qq && sudo apt-get install -y -qq microsocks netcat-openbsd
 
-          # --- 1. Runner IP SOCKS5 (existing) ---
+          # --- 1. Runner IP SOCKS5 ---
           microsocks -i 0.0.0.0 -p 1080 > socks.log 2>&1 &
           sleep 2
           if ! ss -lntp | grep -q ':1080'; then echo "❌ microsocks failed"; cat socks.log; exit 1; fi
@@ -84,67 +84,58 @@ jobs:
           if [ -z "$DOCKER_BRIDGE_IP" ]; then DOCKER_BRIDGE_IP=$(ip -4 route get 1.1.1.1 | grep -oP 'src \K[\d.]+' | head -n1); fi
           echo "SOCKS_INTERNAL=$DOCKER_BRIDGE_IP:1080" >> $GITHUB_ENV
 
-          # --- 2. WARP SOCKS5 (new, Cloudflare IP) ---
+          # --- 2. WARP SOCKS5 (Cloudflare IP) ---
           docker run -d --name warp-socks --restart=always \
             -p 127.0.0.1:1081:9091 \
             ghcr.io/mon-ius/docker-warp-socks
-          # Wait for WARP to be ready
           for i in {1..30}; do
             if curl -x socks5h://127.0.0.1:1081 -fsSL https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
-              echo "✅ WARP SOCKS5 ready on 1081"
-              break
+              echo "✅ WARP SOCKS5 ready on 1081"; break
             fi
             sleep 2
           done
           echo "WARP_SOCKS_INTERNAL=$DOCKER_BRIDGE_IP:1081" >> $GITHUB_ENV
 
-          # --- 3. Bore for Runner SOCKS5 (port 1080) + Watchdog ---
+          # --- 3. Initial bore tunnels for both SOCKS5 ---
           bore local 1080 --to bore.pub > socks_tunnel.log 2>&1 &
-          for i in {1..30}; do
-            SOCKS_HOST=$(grep -oE "bore\.pub:[0-9]+" socks_tunnel.log | head -n1 || true)
-            [ -n "$SOCKS_HOST" ] && break
-            sleep 1
-          done
-          echo "SOCKS_EXTERNAL=$SOCKS_HOST" >> $GITHUB_ENV
+          bore local 1081 --to bore.pub > warp_socks_tunnel.log 2>&1 &
+          sleep 6
+          grep -oE "bore\.pub:[0-9]+" socks_tunnel.log | tail -n1 > /tmp/socks_external.txt || true
+          grep -oE "bore\.pub:[0-9]+" warp_socks_tunnel.log | tail -n1 > /tmp/warp_socks_external.txt || true
 
-          # Watchdog for Runner SOCKS5 bore
+          # --- 4. Port-probing watchdog: Runner IP SOCKS5 (1080) ---
           (
             while true; do
-              if ! pgrep -f "bore local 1080" > /dev/null; then
-                echo "[Watchdog] Runner SOCKS5 bore died. Restarting..." >> socks_watchdog.log
+              sleep 10
+              if ! nc -z -w 3 127.0.0.1 1080 2>/dev/null; then
+                echo "[Watchdog] 1080 tunnel dead $(date -u '+%F %T UTC'), restarting..." >> socks_watchdog.log
+                pkill -f "bore local 1080" 2>/dev/null
+                sleep 2
                 bore local 1080 --to bore.pub >> socks_tunnel.log 2>&1 &
-                sleep 5
+                sleep 6
                 NEW_HOST=$(grep -oE "bore\.pub:[0-9]+" socks_tunnel.log | tail -n1 || true)
                 [ -n "$NEW_HOST" ] && echo "$NEW_HOST" > /tmp/socks_external.txt
               fi
-              sleep 5
             done
           ) &
 
-          # --- 4. Bore for WARP SOCKS5 (port 1081) + Watchdog ---
-          bore local 1081 --to bore.pub > warp_socks_tunnel.log 2>&1 &
-          for i in {1..30}; do
-            WARP_SOCKS_HOST=$(grep -oE "bore\.pub:[0-9]+" warp_socks_tunnel.log | head -n1 || true)
-            [ -n "$WARP_SOCKS_HOST" ] && break
-            sleep 1
-          done
-          echo "WARP_SOCKS_EXTERNAL=$WARP_SOCKS_HOST" >> $GITHUB_ENV
-
-          # Watchdog for WARP SOCKS5 bore
+          # --- 5. Port-probing watchdog: WARP SOCKS5 (1081) ---
           (
             while true; do
-              if ! pgrep -f "bore local 1081" > /dev/null; then
-                echo "[Watchdog] WARP SOCKS5 bore died. Restarting..." >> warp_socks_watchdog.log
+              sleep 10
+              if ! nc -z -w 3 127.0.0.1 1081 2>/dev/null; then
+                echo "[Watchdog] 1081 tunnel dead $(date -u '+%F %T UTC'), restarting..." >> warp_socks_watchdog.log
+                pkill -f "bore local 1081" 2>/dev/null
+                sleep 2
                 bore local 1081 --to bore.pub >> warp_socks_tunnel.log 2>&1 &
-                sleep 5
+                sleep 6
                 NEW_HOST=$(grep -oE "bore\.pub:[0-9]+" warp_socks_tunnel.log | tail -n1 || true)
                 [ -n "$NEW_HOST" ] && echo "$NEW_HOST" > /tmp/warp_socks_external.txt
               fi
-              sleep 5
             done
           ) &
 
-          echo "✅ Both SOCKS5 proxies + watchdogs started."
+          echo "✅ Both SOCKS5 proxies + port-probing watchdogs started."
 
       - name: Launch Windows Container & Expose RDP with Watchdog
         env:
@@ -181,30 +172,30 @@ jobs:
             sleep 1
           done
           RDP_PORT=$(echo "$RDP_HOST" | cut -d':' -f2)
+          echo "$RDP_HOST" > /tmp/rdp_host.txt
 
-          # RDP watchdog (original)
+          # --- RDP port-probing watchdog (fixes the same zombie-tunnel issue) ---
           (
             while true; do
-              if ! pgrep -x "bore" > /dev/null 2>&1; then
-                bore local 3389 --to bore.pub --port "$RDP_PORT" >> rdp_tunnel.log 2>&1 &
-                sleep 5
-                if ! pgrep -x "bore" > /dev/null 2>&1; then
-                  bore local 3389 --to bore.pub >> rdp_tunnel.log 2>&1 &
-                  sleep 4
-                  NEW_HOST=$(grep -oE "bore\.pub:[0-9]+" rdp_tunnel.log | tail -n1 || true)
-                  [ -n "$NEW_HOST" ] && RDP_PORT=$(echo "$NEW_HOST" | cut -d':' -f2)
-                fi
+              sleep 10
+              if ! nc -z -w 3 127.0.0.1 3389 2>/dev/null; then
+                echo "[RDP Watchdog] 3389 tunnel dead $(date -u '+%F %T UTC'), restarting..." >> rdp_watchdog.log
+                pkill -f "bore local 3389" 2>/dev/null
+                sleep 2
+                bore local 3389 --to bore.pub >> rdp_tunnel.log 2>&1 &
+                sleep 6
+                NEW_HOST=$(grep -oE "bore\.pub:[0-9]+" rdp_tunnel.log | tail -n1 || true)
+                [ -n "$NEW_HOST" ] && echo "$NEW_HOST" > /tmp/rdp_host.txt
               fi
-              sleep 3
             done
           ) &
 
           CURRENT_IP=$(curl -s https://api.ipify.org || echo "Unknown")
 
-          # Read latest external SOCKS endpoints (watchdog may have updated)
-          SOCKS_EXT=$(cat /tmp/socks_external.txt 2>/dev/null || echo "$SOCKS_EXTERNAL")
-          WARP_SOCKS_EXT=$(cat /tmp/warp_socks_external.txt 2>/dev/null || echo "$WARP_SOCKS_EXTERNAL")
-
+          # Read latest endpoints (watchdogs may have rotated ports)
+          SOCKS_EXT=$(cat /tmp/socks_external.txt 2>/dev/null || echo "pending")
+          WARP_SOCKS_EXT=$(cat /tmp/warp_socks_external.txt 2>/dev/null || echo "pending")
+          RDP_HOST=$(cat /tmp/rdp_host.txt 2>/dev/null || echo "$RDP_HOST")
           echo "=================================================="
           echo "🎉 WINDOWS NODE LIVE"
           echo "🖥️  RDP Host: $RDP_HOST"
@@ -216,7 +207,7 @@ jobs:
           echo "=================================================="
 
           if [ -n "$DISCORD_WEBHOOK_URL" ]; then
-            curl -s -H "Content-Type: application/json" -X POST -d "{\"content\": \"🚀 Windows Node LIVE\\n\\n🖥️ RDP: \`$RDP_HOST\` | User: \`${{ inputs.rdp_username }}\` | Pass: \`${{ inputs.rdp_password }}\`\\n🌐 Web: $DESKTOP_URL\\n\\n🧦 SOCKS5 Runner IP (Windows): \`$SOCKS_INTERNAL\`\\n🧦 SOCKS5 Runner IP (External): \`socks5://$SOCKS_EXT\`\\n🧦 SOCKS5 WARP IP (Windows): \`$WARP_SOCKS_INTERNAL\`\\n🧦 SOCKS5 WARP IP (External): \`socks5://$WARP_SOCKS_EXT\`\"}" "$DISCORD_WEBHOOK_URL" || true
+            curl -s -H "Content-Type: application/json" -X POST -d "{\"content\": \"🚀 Windows Node LIVE\\n\\n🖥️ RDP: \`$RDP_HOST\` | User: \`${{ inputs.rdp_username }}\` | Pass: \`${{ inputs.rdp_password }}\`\\n🌐 Web: $DESKTOP_URL\\n\\n🧦 SOCKS5 Runner IP (Windows): \`$SOCKS_INTERNAL\`\\n🧦 SOCKS5 Runner IP (External): \`socks5://$SOCKS_EXT\`\\n🧦 SOCKS5 WARP IP (Windows): \`$WARP_SOCKS_INTERNAL\`\\n🧦 SOCKS5 WARP IP (External): \`socks5://$WARP_SOCKS_EXT\`\\n\\n⚠️ External ports auto-rotate if bore.pub drops — re-check Discord/logs periodically.\"}" "$DISCORD_WEBHOOK_URL" || true
           fi
 
           docker logs -f votify-windows-node &
