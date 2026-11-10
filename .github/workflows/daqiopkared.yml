@@ -1,0 +1,99 @@
+name: Cloudflare Tunnel SOCKS5 Proxy
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'Minutes to keep proxy alive (max 360)'
+        required: true
+        default: '30'
+
+jobs:
+  cf-proxy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Install Chisel & Cloudflared
+        run: |
+          curl -sL https://i.jpillora.com/chisel! | sudo bash
+          curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+
+      - name: Start Tunnel & Send to Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PROXY_USER: "tvkk"
+          PROXY_PASS: "13579"
+        run: |
+          # 1. Start Chisel server with SOCKS5 enabled on localhost:8080
+          nohup chisel server --port 8080 --socks5 --auth "${PROXY_USER}:${PROXY_PASS}" > chisel.log 2>&1 &
+
+          # 2. Start Cloudflare Quick Tunnel pointing to localhost:8080
+          nohup cloudflared tunnel --url http://localhost:8080 --no-autoupdate > cf.log 2>&1 &
+
+          # 3. Wait for Cloudflare to generate the *.trycloudflare.com URL
+          echo "Waiting for Cloudflare Tunnel URL..."
+          for i in {1..15}; do
+            CF_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' cf.log | head -n 1 || true)
+            if [ -n "$CF_URL" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$CF_URL" ]; then
+            echo "ERROR: Failed to obtain Cloudflare Tunnel URL."
+            cat cf.log
+            exit 1
+          fi
+
+          PUBLIC_IP=$(curl -s https://api.ipify.org)
+
+          echo "=========================================================="
+          echo "Runner Public Outbound IP : $PUBLIC_IP"
+          echo "Cloudflare Tunnel URL     : $CF_URL"
+          echo "=========================================================="
+
+          # 4. Send formatted notification to Discord Webhook
+          if [ -n "$DISCORD_WEBHOOK" ]; then
+            PAYLOAD=$(jq -n \
+              --arg ip "$PUBLIC_IP" \
+              --arg url "$CF_URL" \
+              --arg auth "${PROXY_USER}:${PROXY_PASS}" \
+              --arg dur "${{ inputs.duration_minutes }}" \
+              '{
+                username: "GitHub Runner Proxy",
+                embeds: [{
+                  title: "Cloudflare SOCKS5 Proxy Active",
+                  color: 3066993,
+                  fields: [
+                    { name: "Runner Public IP", value: ("`" + $ip + "`"), inline: true },
+                    { name: "Duration", value: ($dur + " mins"), inline: true },
+                    { name: "Tunnel Endpoint", value: $url, inline: false },
+                    { name: "1. Connect Local Chisel Client", value: ("```bash\nchisel client --auth \"" + $auth + "\" " + $url + " socks\n```"), inline: false },
+                    { name: "2. Test Local SOCKS5 Port", value: "```bash\ncurl -x socks5h://127.0.0.1:1080 [https://api.ipify.org](https://api.ipify.org)\n```", inline: false }
+                  ]
+                }]
+              }')
+
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/json" -X POST -d "$PAYLOAD" "$DISCORD_WEBHOOK")
+            echo "Discord notification sent (HTTP status: $HTTP_STATUS)"
+          else
+            echo "WARNING: DISCORD_WEBHOOK_URL secret is empty. Skipping Discord alert."
+          fi
+
+      - name: Keep Tunnel Alive
+        run: |
+          echo "Tunnel active for ${{ inputs.duration_minutes }} minutes. Cancel workflow when done."
+          sleep $(( ${{ inputs.duration_minutes }} * 60 ))
+
+      - name: Send Disconnect Alert to Discord
+        if: always()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -n "$DISCORD_WEBHOOK" ]; then
+            curl -s -H "Content-Type: application/json" -X POST \
+              -d '{"username": "GitHub Runner Proxy", "content": "🔴 Proxy session ended. The Cloudflare tunnel is now closed."}' \
+              "$DISCORD_WEBHOOK"
+          fi
